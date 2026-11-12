@@ -1,0 +1,5 @@
+# Workspace for developing and testing FlyingWeb's pure-Rust simulation,
+# camera, traversal, gadget, animation, suit, and UI engine crate.
+[workspace]
+members = ["mixins/flyingweb/flyingweb_core"]
+resolver = "3"
