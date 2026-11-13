@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Matches Horizon Launcher's native mod Rust toolchain (`launcher/src/rust_toolchain.rs`).
+  RUST_TOOLCHAIN: "1.99.1"
+
+jobs:
+  lint-and-test:
+    name: Format, Clippy, Bundle Validation & Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy || \
+            rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          if rustup toolchain list | grep -q "^$RUST_TOOLCHAIN"; then
+            rustup default "$RUST_TOOLCHAIN"
+          else
+            rustup default stable
+          fi
+          rustc --version
+          cargo --version
+
+      - name: Validate manifest, dependency allowlist & mixin hygiene
+        run: python3 tools/verify_bundle.py check
+
+      - name: Lint core crate with Clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run physics, raycast, camera, traversal, gadget & suit unit/integration tests
+        run: cargo test --workspace -- --nocapture
+
+      - name: Check Rust formatting (rustfmt)
+        run: cargo fmt --all -- --check
+
+  horizon-integration:
+    name: Horizon 26.3 Mixin Build & .hnmod Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries required by Horizon 26.3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal || \
+            rustup toolchain install stable --profile minimal
+          if rustup toolchain list | grep -q "^$RUST_TOOLCHAIN"; then
+            rustup default "$RUST_TOOLCHAIN"
+          else
+            rustup default stable
+          fi
+
+      - name: Cache Horizon source, horizon-mixins & Cargo build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/horizon-ci/horizon/
+            target/horizon-ci/horizon-mixins/
+          key: horizon-26.3-${{ hashFiles('compatibility.json', 'mixins/flyingweb/flyingweb_core/Cargo.toml') }}
+          restore-keys: |
+            horizon-26.3-
+
+      - name: Apply FlyingWeb to Horizon 26.3, compile game & verify .hnmod
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/horizon_ci.py --out-dir dist
+
+      - name: Upload verified .hnmod artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flyingweb-hnmod
+          path: |
+            dist/*.hnmod
+            dist/*.sha256
+          if-no-files-found: error

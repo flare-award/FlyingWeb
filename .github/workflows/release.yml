@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.0) when triggered manually"
+        required: false
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.99.1"
+
+jobs:
+  build-and-publish:
+    name: Build, Verify & Publish .hnmod Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries required by Horizon 26.3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy || \
+            rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          if rustup toolchain list | grep -q "^$RUST_TOOLCHAIN"; then
+            rustup default "$RUST_TOOLCHAIN"
+          else
+            rustup default stable
+          fi
+
+      - name: Run full format, clippy & test suite
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
+      - name: Build against Horizon 26.3 & verify .hnmod bundle
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/horizon_ci.py --out-dir dist
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flyingweb-release-bundle
+          path: |
+            dist/*.hnmod
+            dist/*.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" dist/*.hnmod dist/*.sha256 --clobber
+          else
+            gh release create "$TAG_NAME" dist/*.hnmod dist/*.sha256 \
+              --title "FlyingWeb $TAG_NAME (Horizon 26.3)" \
+              --generate-notes
+          fi
